@@ -1,4 +1,4 @@
-// main.ts - Deno Deploy 多 AI API 代理（Groq 路徑最終修復 + 強制補 v1）
+// main.ts - Deno Deploy 多 AI API 代理（Groq 官方端點最終修復）
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,8 +41,7 @@ const HTML = `<!DOCTYPE html>
 
 function getVersionPrefix(prefix: string): string {
   if (prefix === "/gemini") return "/v1beta";
-  if (prefix === "/groq") return "/v1";  // ← 改回補 /v1，讓 Groq 也補（因為 base 設成 https://api.groq.com/openai）
-  return "/v1";
+  return "/v1"; // 包含 Groq 在內都補 /v1
 }
 
 async function handleProxy(req: Request, base: string, prefix: string): Promise<Response> {
@@ -52,17 +51,21 @@ async function handleProxy(req: Request, base: string, prefix: string): Promise<
   if (!path || path === "/") path = "/";
   else if (!path.startsWith("/")) path = "/" + path;
 
+  // 自動補版本前綴
   const version = getVersionPrefix(prefix);
   if (!path.startsWith(version)) {
-    path = version + path;
+    path = version + (path === "/" ? "" : path);
   }
 
-  // 強制確保 path 以 / 開頭，避免 URL 拼接取代 base 尾段
+  // 強制確保 path 以 / 開頭，避免 URL 解析取代 base 尾段
   if (!path.startsWith("/")) path = "/" + path;
 
-  const targetURL = new URL(path, base.endsWith('/') ? base.slice(0, -1) : base);  // 確保 base 無尾 /，path 有 / 開頭
+  // 處理 base 結尾：確保無尾 /，path 有 / 開頭
+  let cleanBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  const targetURL = new URL(path, cleanBase);
 
-  console.log(`[Proxy Debug] Prefix: ${prefix} | Raw slice: ${url.pathname.slice(prefix.length)} | Version: ${version} | Final path: ${path} | Base: ${base} | Target: ${targetURL.toString()}`);
+  // 詳細 debug log
+  console.log(`[Proxy Debug] Prefix: ${prefix} | Raw slice: ${url.pathname.slice(prefix.length)} | Version applied: ${version} | Final path: ${path} | Clean base: ${cleanBase} | Full Target: ${targetURL.toString()}`);
 
   const headers = new Headers(req.headers);
 
@@ -70,7 +73,7 @@ async function handleProxy(req: Request, base: string, prefix: string): Promise<
   hopByHop.forEach(h => headers.delete(h));
 
   for (const key of [...headers.keys()]) {
-    if (key.toLowerCase().startsWith("cf-") || (key.toLowerCase().startsWith("x-forwarded-") && key !== "x-forwarded-for")) {
+    if (key.toLowerCase().startsWith("cf-") || (key.toLowerCase().startsWith("x-forwarded-") && key.toLowerCase() !== "x-forwarded-for")) {
       headers.delete(key);
     }
   }
@@ -122,14 +125,14 @@ Deno.serve(async (req: Request) => {
     { prefix: "/chatgpt", base: "https://api.openai.com" },
     { prefix: "/claude",  base: "https://api.anthropic.com" },
     { prefix: "/gemini",  base: "https://generativelanguage.googleapis.com" },
-    { prefix: "/groq",    base: "https://api.groq.com/openai" },  // ← 改回官方 base（不含 /v1），靠自動補 /v1
+    { prefix: "/groq",    base: "https://api.groq.com/openai" },  // 只到 /openai，靠自動補 /v1
     { prefix: "/grok",    base: "https://api.x.ai/v1" },
   ];
 
   for (const r of routes) {
     if (pathname === r.prefix || pathname === r.prefix + "/") {
       return new Response(
-        `\( {r.prefix} 代理已就緒！\n\n使用示例： \){r.prefix}/chat/completions`,
+        `\( {r.prefix} 代理已就緒！\n\n使用： \){r.prefix}/chat/completions （自動補 v1）`,
         { headers: { "content-type": "text/plain; charset=utf-8" } }
       );
     }
@@ -141,5 +144,5 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  return new Response("404 - 請使用支援的前綴", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
+  return new Response("404 - 請使用支援前綴之一", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } });
 });
