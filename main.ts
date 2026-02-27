@@ -1,4 +1,4 @@
-// main.ts - Deno Deploy 多 AI API 代理（2026 修正穩定版）
+// main.ts - Deno Deploy 多 AI API 代理（2026 修正穩定版 - Groq 路徑修正）
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,7 +41,8 @@ const HTML = `<!DOCTYPE html>
 
 function getVersionPrefix(prefix: string): string {
   if (prefix === "/gemini") return "/v1beta";
-  return "/v1"; // chatgpt、claude、groq、grok 都用 /v1
+  if (prefix === "/groq") return "";          // Groq base 已包含 /v1，不再自動補
+  return "/v1";
 }
 
 async function handleProxy(req: Request, base: string, prefix: string): Promise<Response> {
@@ -51,9 +52,9 @@ async function handleProxy(req: Request, base: string, prefix: string): Promise<
   if (!path || path === "/") path = "/";
   else if (!path.startsWith("/")) path = "/" + path;
 
-  // 自動補版本前綴
+  // 自動補版本前綴（Groq 除外）
   const version = getVersionPrefix(prefix);
-  if (!path.startsWith(version)) {
+  if (version && !path.startsWith(version)) {
     path = version + (path === "/" ? "" : path);
   }
 
@@ -86,7 +87,7 @@ async function handleProxy(req: Request, base: string, prefix: string): Promise<
   // 只在有 body 且非 GET/HEAD 時才設定 body + duplex
   if (req.body && !["GET", "HEAD"].includes(req.method)) {
     proxyReqInit.body = req.body;
-    proxyReqInit.duplex = "half" as any; // Deno 目前仍需此斷言
+    proxyReqInit.duplex = "half" as any;
   }
 
   try {
@@ -94,7 +95,7 @@ async function handleProxy(req: Request, base: string, prefix: string): Promise<
 
     const newHeaders = new Headers(resp.headers);
 
-    // 移除可能與 streaming 衝突的 header，讓 Deno 自行處理 chunked
+    // 移除可能與 streaming 衝突的 header
     newHeaders.delete("content-length");
     newHeaders.delete("transfer-encoding");
 
@@ -135,15 +136,15 @@ Deno.serve(async (req: Request) => {
     { prefix: "/chatgpt", base: "https://api.openai.com" },
     { prefix: "/claude",  base: "https://api.anthropic.com" },
     { prefix: "/gemini",  base: "https://generativelanguage.googleapis.com" },
-    { prefix: "/groq",    base: "https://api.groq.com/openai" },
-    { prefix: "/grok",    base: "https://api.x.ai/v1" },           // 正確的 Grok API 路徑
+    { prefix: "/groq",    base: "https://api.groq.com/openai/v1" },  // 修正為官方完整路徑
+    { prefix: "/grok",    base: "https://api.x.ai/v1" },
   ];
 
   // 根前綴友好提示
   for (const r of routes) {
     if (pathname === r.prefix || pathname === r.prefix + "/") {
       return new Response(
-        `\( {r.prefix} 代理已就緒！\n\n請使用完整路徑，例如：\n \){r.prefix}/chat/completions\n或 ${r.prefix}/v1/chat/completions（會自動補 v1）`,
+        `\( {r.prefix} 代理已就緒！\n\n請使用完整路徑，例如：\n \){r.prefix}/chat/completions\n或 ${r.prefix}/v1/chat/completions（視模型自動處理）`,
         { headers: { "content-type": "text/plain; charset=utf-8" } }
       );
     }
