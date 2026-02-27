@@ -1,150 +1,166 @@
-// API 端點與金鑰配置（金鑰請務必從環境變數讀取）
-const API_ENDPOINTS: Record<string, string> = {
-  chatgpt: "https://api.openai.com",
-  claude: "https://api.anthropic.com",
-  gemini: "https://generativelanguage.googleapis.com",
-  groq: "https://api.groq.com/openai",
-  grok: "https://api.x.ai",
+// main.ts - Deno Deploy 多 AI API 代理（2026 修正穩定版）
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE, PATCH",
+  "Access-Control-Allow-Headers": "*",
+  "Access-Control-Expose-Headers": "*",
 };
 
-const API_KEYS: Record<string, string | undefined> = {
-  chatgpt: Deno.env.get("OPENAI_API_KEY"),
-  claude: Deno.env.get("ANTHROPIC_API_KEY"),
-  gemini: Deno.env.get("GEMINI_API_KEY"),       // Google 常用 x-goog-api-key 或 Bearer
-  groq: Deno.env.get("GROQ_API_KEY"),
-  grok: Deno.env.get("XAI_API_KEY"),
-};
+const HTML = `<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI API Proxy</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #1f2937; }
+        h1 { color: #2563eb; }
+        code { background: #f1f5f9; padding: 3px 6px; border-radius: 4px; font-family: monospace; }
+        .note { color: #64748b; margin-top: 30px; font-size: 0.95em; }
+    </style>
+</head>
+<body>
+    <h1>🌐 多模型 AI API 代理服務</h1>
+    <p><strong>此地址用於代理 ChatGPT、Claude、Gemini、Groq 和 Grok API。</strong><br>請使用以下前綴：</p>
+    
+    <h2>支援的前綴</h2>
+    <ul>
+        <li><strong>/chatgpt/</strong> → OpenAI (ChatGPT / GPT 系列)</li>
+        <li><strong>/claude/</strong> → Anthropic Claude</li>
+        <li><strong>/gemini/</strong> → Google Gemini</li>
+        <li><strong>/groq/</strong> → Groq（極速推理）</li>
+        <li><strong>/grok/</strong> → xAI Grok</li>
+    </ul>
 
-const PROXY_TOKEN = Deno.env.get("PROXY_TOKEN");   // 若設定此值，則強制驗證 Bearer token
+    <p>使用方式：在您的程式或工具中，將 base URL 設為：</p>
+    <p><code>https://您的專案.deno.dev/chatgpt</code>（或其他前綴）</p>
+    <p class="note">✅ 自動補 /v1 或 /v1beta • 完整支援 Streaming • CORS 已開啟<br>請自行在請求中帶上 Authorization: Bearer sk-...（或 x-api-key 等）</p>
+</body>
+</html>`;
 
-// 首頁 HTML（保持原樣，略過顯示）
-const HOME_PAGE = `<!DOCTYPE html>...`;  // ← 請把你原本的 HOME_PAGE 完整內容貼回這裡
+function getVersionPrefix(prefix: string): string {
+  if (prefix === "/gemini") return "/v1beta";
+  return "/v1"; // chatgpt、claude、groq、grok 都用 /v1
+}
 
-async function handleRequest(req: Request): Promise<Response> {
+async function handleProxy(req: Request, base: string, prefix: string): Promise<Response> {
+  const url = new URL(req.url);
+  let path = url.pathname.slice(prefix.length);
+
+  if (!path || path === "/") path = "/";
+  else if (!path.startsWith("/")) path = "/" + path;
+
+  // 自動補版本前綴
+  const version = getVersionPrefix(prefix);
+  if (!path.startsWith(version)) {
+    path = version + (path === "/" ? "" : path);
+  }
+
+  const targetURL = new URL(path + url.search, base);
+
+  const headers = new Headers(req.headers);
+
+  // 移除 hop-by-hop headers 與可能干擾的 header
+  const hopByHop = [
+    "host", "connection", "keep-alive", "proxy-connection",
+    "te", "trailers", "transfer-encoding", "upgrade"
+  ];
+  hopByHop.forEach(h => headers.delete(h));
+
+  // 移除 Cloudflare 等常加的開頭
+  for (const key of [...headers.keys()]) {
+    if (key.toLowerCase().startsWith("cf-") ||
+        key.toLowerCase().startsWith("x-forwarded-") && key !== "x-forwarded-for") {
+      headers.delete(key);
+    }
+  }
+
+  // 準備 proxy 請求
+  const proxyReqInit: RequestInit = {
+    method: req.method,
+    headers,
+    redirect: "manual",
+  };
+
+  // 只在有 body 且非 GET/HEAD 時才設定 body + duplex
+  if (req.body && !["GET", "HEAD"].includes(req.method)) {
+    proxyReqInit.body = req.body;
+    proxyReqInit.duplex = "half" as any; // Deno 目前仍需此斷言
+  }
+
+  try {
+    const resp = await fetch(targetURL.toString(), proxyReqInit);
+
+    const newHeaders = new Headers(resp.headers);
+
+    // 移除可能與 streaming 衝突的 header，讓 Deno 自行處理 chunked
+    newHeaders.delete("content-length");
+    newHeaders.delete("transfer-encoding");
+
+    // 加入 CORS
+    Object.entries(CORS_HEADERS).forEach(([k, v]) => newHeaders.set(k, v));
+
+    return new Response(resp.body, {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: newHeaders,
+    });
+  } catch (err: any) {
+    console.error("[Proxy Error]", err);
+    return new Response(`Proxy Error: ${err?.message || String(err)}`, {
+      status: 502,
+      headers: CORS_HEADERS,
+    });
+  }
+}
+
+Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
   const pathname = url.pathname;
 
   // 首頁
-  if (pathname === "/" || pathname === "") {
-    return new Response(HOME_PAGE, {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
+  if (pathname === "/" || pathname === "/index.html") {
+    return new Response(HTML, {
+      headers: { "content-type": "text/html; charset=utf-8" },
     });
   }
 
-  // 處理 CORS 預檢
+  // CORS 預檢
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type, x-requested-with",
-        "Access-Control-Max-Age": "86400",
-      },
-    });
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
-  // 檢查是否為 API 代理請求
-  for (const [prefix, endpoint] of Object.entries(API_ENDPOINTS)) {
-    if (pathname.startsWith(`/${prefix}/`)) {
-      return proxyRequest(req, prefix, endpoint);
+  const routes = [
+    { prefix: "/chatgpt", base: "https://api.openai.com" },
+    { prefix: "/claude",  base: "https://api.anthropic.com" },
+    { prefix: "/gemini",  base: "https://generativelanguage.googleapis.com" },
+    { prefix: "/groq",    base: "https://api.groq.com/openai" },
+    { prefix: "/grok",    base: "https://api.x.ai/v1" },           // 正確的 Grok API 路徑
+  ];
+
+  // 根前綴友好提示
+  for (const r of routes) {
+    if (pathname === r.prefix || pathname === r.prefix + "/") {
+      return new Response(
+        `\( {r.prefix} 代理已就緒！\n\n請使用完整路徑，例如：\n \){r.prefix}/chat/completions\n或 ${r.prefix}/v1/chat/completions（會自動補 v1）`,
+        { headers: { "content-type": "text/plain; charset=utf-8" } }
+      );
     }
   }
 
-  return new Response("Not Found", { status: 404 });
-}
-
-async function proxyRequest(
-  req: Request,
-  prefix: string,
-  baseEndpoint: string,
-): Promise<Response> {
-  try {
-    // 1. 驗證 Bearer Token（若有設定 PROXY_TOKEN）
-    if (PROXY_TOKEN) {
-      const auth = req.headers.get("authorization");
-      if (!auth || auth !== `Bearer ${PROXY_TOKEN}`) {
-        return new Response("Unauthorized", {
-          status: 401,
-          headers: { "Content-Type": "text/plain" },
-        });
-      }
+  // 路由匹配與代理
+  for (const r of routes) {
+    if (pathname.startsWith(r.prefix)) {
+      return await handleProxy(req, r.base, r.prefix);
     }
-
-    // 2. 取得對應 API Key
-    const apiKey = API_KEYS[prefix];
-    if (!apiKey) {
-      return new Response(`API key for ${prefix} is not configured`, { status: 500 });
-    }
-
-    // 3. 構建目標 URL
-    const url = new URL(req.url);
-    let targetPath = url.pathname.replace(`/${prefix}`, "");
-    if (!targetPath.startsWith("/")) targetPath = "/" + targetPath;
-
-    const targetUrl = new URL(targetPath + url.search, baseEndpoint);
-
-    // 4. 準備 headers
-    const headers = new Headers(req.headers);
-    headers.delete("host");
-    headers.delete("connection");
-    headers.delete("keep-alive");
-
-    // 根據不同服務設定 Authorization
-    if (prefix === "gemini") {
-      // Google Generative Language API 常用 x-goog-api-key
-      headers.set("x-goog-api-key", apiKey);
-      headers.delete("authorization"); // 避免衝突
-    } else {
-      // 其他大多數使用 Bearer
-      headers.set("Authorization", `Bearer ${apiKey}`);
-    }
-
-    // 5. 建立代理請求
-    const proxyReqInit: RequestInit = {
-      method: req.method,
-      headers,
-      redirect: "follow",
-    };
-
-    // 支援 streaming 上傳與下傳（關鍵）
-    if (req.body && !["GET", "HEAD"].includes(req.method)) {
-      proxyReqInit.body = req.body;
-      (proxyReqInit as any).duplex = "half";
-    }
-
-    const proxyRequest = new Request(targetUrl.toString(), proxyReqInit);
-
-    // 6. 發送請求
-    const response = await fetch(proxyRequest);
-
-    // 7. 準備回應 headers（加入 CORS）
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set("Access-Control-Allow-Origin", "*");
-    responseHeaders.set("Access-Control-Expose-Headers", "*");
-
-    // 8. 回傳
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
-    });
-  } catch (err) {
-    console.error(`[${prefix}] proxy error:`, err);
-    return new Response(
-      JSON.stringify({ error: "Proxy request failed" }),
-      {
-        status: 502,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-        },
-      },
-    );
   }
-}
 
-// Deno Deploy 入口
-Deno.serve((req: Request) => {
-  return handleRequest(req);
+  return new Response(
+    "404 - 請使用以下前綴之一： /chatgpt/、/claude/、/gemini/、/groq/、/grok/",
+    {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    }
+  );
 });
